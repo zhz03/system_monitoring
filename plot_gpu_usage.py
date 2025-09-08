@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Plot GPU memory usage over time from CSV logs.
+Plot GPU and system memory usage over time from CSV logs.
 
 Supports:
 - CSV from gpu_watch.py with header:
   timestamp,gpu_index,pid,cmd,gpu_mem_mib,sm_util_pct,mem_util_pct
-- Minimal CSV like gpu_watch.sh output with header:
-  timestamp,used_mib
+- Minimal CSV like gpu_watch.sh output with headers:
+  timestamp,used_mib[,sys_used_mib]
 
 Usage examples:
   python3 plot_gpu_usage.py gpu_log.csv --output gpu_usage.png
@@ -20,7 +20,7 @@ import os
 import sys
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 
 def parse_time(ts: str) -> datetime:
@@ -41,8 +41,8 @@ def parse_time(ts: str) -> datetime:
         raise
 
 
-def load_series_from_gpu_watch(path: str, per_gpu: bool) -> Dict[str, List[Tuple[datetime, float]]]:
-    """Return mapping name -> [(time, value MiB)]"""
+def load_series_from_gpu_watch(path: str, per_gpu: bool) -> Tuple[Dict[str, List[Tuple[datetime, float]]], Dict[str, List[Tuple[datetime, float]]]]:
+    """Return (gpu_series_map, ram_series_map). ram_series_map is empty for this format."""
     by_ts_total: Dict[str, float] = defaultdict(float)  # ts -> total MiB
     by_ts_gpu: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))  # ts -> gpu -> MiB
 
@@ -77,37 +77,44 @@ def load_series_from_gpu_watch(path: str, per_gpu: bool) -> Dict[str, List[Tuple
             for ts in times_sorted:
                 val = by_ts_gpu.get(ts, {}).get(gpu, 0.0)
                 series[f"GPU {gpu}"] .append((parse_time(ts), val))
-        return series
+        return series, {}
     else:
         times_sorted = sorted(by_ts_total.keys(), key=parse_time)
-        return {"Total": [(parse_time(ts), by_ts_total[ts]) for ts in times_sorted]}
+        return {"Total": [(parse_time(ts), by_ts_total[ts]) for ts in times_sorted]}, {}
 
 
-def load_series_from_mem_only(path: str) -> Dict[str, List[Tuple[datetime, float]]]:
-    series: List[Tuple[datetime, float]] = []
+def load_series_from_mem_only(path: str) -> Tuple[Dict[str, List[Tuple[datetime, float]]], Dict[str, List[Tuple[datetime, float]]]]:
+    gpu_series: List[Tuple[datetime, float]] = []
+    ram_series: List[Tuple[datetime, float]] = []
     with open(path, newline="") as f:
         r = csv.DictReader(f)
         for row in r:
             ts = row.get("timestamp")
             used = row.get("used_mib")
-            if not ts or used is None or used == "":
-                continue
-            try:
-                series.append((parse_time(ts), float(used)))
-            except Exception:
-                continue
-    series.sort(key=lambda x: x[0])
-    return {"Total": series}
+            sys_used = row.get("sys_used_mib")
+            if ts and used not in (None, ""):
+                try:
+                    gpu_series.append((parse_time(ts), float(used)))
+                except Exception:
+                    pass
+            if ts and sys_used not in (None, ""):
+                try:
+                    ram_series.append((parse_time(ts), float(sys_used)))
+                except Exception:
+                    pass
+    gpu_series.sort(key=lambda x: x[0])
+    ram_series.sort(key=lambda x: x[0])
+    return {"Total": gpu_series}, ({"System": ram_series} if ram_series else {})
 
 
-def auto_loader(path: str, per_gpu: bool) -> Dict[str, List[Tuple[datetime, float]]]:
+def auto_loader(path: str, per_gpu: bool) -> Tuple[Dict[str, List[Tuple[datetime, float]]], Dict[str, List[Tuple[datetime, float]]]]:
     # Peek header to decide
     with open(path, newline="") as f:
         reader = csv.reader(f)
         try:
             header = next(reader)
         except StopIteration:
-            return {"Total": []}
+            return {"Total": []}, {}
     header_lc = [h.strip().lower() for h in header]
     if "gpu_mem_mib" in header_lc:
         return load_series_from_gpu_watch(path, per_gpu)
@@ -116,7 +123,14 @@ def auto_loader(path: str, per_gpu: bool) -> Dict[str, List[Tuple[datetime, floa
     raise ValueError("Unrecognized CSV header. Expected gpu_mem_mib or used_mib column.")
 
 
-def do_plot(series_map: Dict[str, List[Tuple[datetime, float]]], title: str, output: str = None, show: bool = False):
+def do_plot(
+    gpu_series_map: Dict[str, List[Tuple[datetime, float]]],
+    ram_series_map: Optional[Dict[str, List[Tuple[datetime, float]]]] = None,
+    title_gpu: str = "GPU Memory Usage",
+    title_ram: str = "System Memory Usage",
+    output: str = None,
+    show: bool = False,
+):
     try:
         import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
@@ -124,33 +138,57 @@ def do_plot(series_map: Dict[str, List[Tuple[datetime, float]]], title: str, out
         print("matplotlib not available: {}".format(e), file=sys.stderr)
         sys.exit(2)
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(11, 7))
     any_points = False
-    for name, series in series_map.items():
+    # Top subplot: GPU memory
+    for name, series in gpu_series_map.items():
         if not series:
             continue
         any_points = True
         xs = [t for t, _ in series]
         ys = [v for _, v in series]
-        ax.plot(xs, ys, label=name, linewidth=1.8)
+        ax1.plot(xs, ys, label=name, linewidth=1.8)
 
     if not any_points:
         print("No data points to plot.", file=sys.stderr)
         sys.exit(1)
 
-    ax.set_title(title)
-    ax.set_xlabel("Time")
-    ax.set_ylabel("GPU Memory (MiB)")
+    ax1.set_title(title_gpu)
+    ax1.set_ylabel("GPU Memory (MiB)")
 
     # Time axis formatting
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
-    fig.autofmt_xdate()
+    ax2.set_xlabel("Time")
+    # Time axis formatting on the shared x-axis
+    ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+    fig.autofmt_xdate()  # rotates tick labels
 
-    if len(series_map) > 1:
-        ax.legend(loc="best")
+    if len(gpu_series_map) > 1:
+        ax1.legend(loc="best")
 
-    ax.grid(True, linestyle=":", alpha=0.4)
+    ax1.grid(True, linestyle=":", alpha=0.4)
+
+    # Bottom subplot: System RAM usage (if available)
+    has_ram = False
+    if ram_series_map:
+        for name, series in ram_series_map.items():
+            if not series:
+                continue
+            has_ram = True
+            xs = [t for t, _ in series]
+            ys = [v for _, v in series]
+            ax2.plot(xs, ys, label=name, color="#cc5500", linewidth=1.8)
+    if has_ram:
+        ax2.set_title(title_ram)
+        ax2.set_ylabel("System Memory (MiB)")
+        if len(ram_series_map) > 1:
+            ax2.legend(loc="best")
+    else:
+        ax2.set_title("System Memory Usage (no data)")
+        ax2.set_ylabel("System Memory (MiB)")
+        ax2.text(0.5, 0.5, "No system memory data", transform=ax2.transAxes,
+                 ha="center", va="center", color="gray")
+    ax2.grid(True, linestyle=":", alpha=0.4)
     fig.tight_layout()
 
     if output:
@@ -180,10 +218,11 @@ def main():
         print(f"Failed to read CSV: {e}", file=sys.stderr)
         sys.exit(1)
 
-    title = "GPU Memory Usage" + (" (per GPU)" if args.per_gpu else "")
-    do_plot(series_map, title=title, output=args.output, show=args.show)
+    title_gpu = "GPU Memory Usage" + (" (per GPU)" if args.per_gpu else "")
+    gpu_map, ram_map = auto_loader(path, args.per_gpu)
+    do_plot(gpu_map, ram_map, title_gpu=title_gpu, title_ram="System Memory Usage",
+            output=args.output, show=args.show)
 
 
 if __name__ == "__main__":
     main()
-
