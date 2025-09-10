@@ -34,10 +34,14 @@
   - `python3 gpu_watch.py --pid 1234 --interval 10 --append --output ~/gpu.csv`
 
 **Bash Helper Script**
-- Script: `gpu_watch.sh` — minimal logger that records only GPU memory usage for a single PID.
-- Output CSV: `timestamp,used_mib` written to `OUT` (default `./mem_only.csv`).
-- Configuration: edit `PID` and `OUT` at the top of the script; sampling interval is controlled by `sleep 30`.
-- Dependencies: `nvidia-smi`, `awk`, and `date` available in the environment.
+- Script: `gpu_watch.sh` — minimal logger for a single PID with extra system/CPU metrics.
+- Output CSV header: `timestamp,used_mib,sys_used_mib,cpu_cores,cpu_pct`
+  - `used_mib`: target PID's GPU memory (MiB)
+  - `sys_used_mib`: system RAM used (MiB), from `/proc/meminfo`
+  - `cpu_cores`: logical cores (per-thread psr) observed at sample time, e.g. `8/9/11`
+  - `cpu_pct`: process CPU usage percent (`ps pcpu`); may exceed 100 for multi-threaded
+- Configuration: edit `PID` and `OUT`; sampling interval via `sleep 30`.
+- Dependencies: `nvidia-smi`, `awk`, `ps`, and `date` available in the environment.
 - Behavior: if the target PID is not present in `nvidia-smi --query-compute-apps`, an empty value is written for `used_mib`.
 - Run:
   - `chmod +x gpu_watch.sh`
@@ -45,6 +49,23 @@
 - Customize:
   - Change `sleep` duration to adjust interval.
   - Run multiple copies for different PIDs or adapt the `awk` filter to handle a list of PIDs.
+
+**Plotting**
+- Script: `plot_gpu_usage.py` — visualize CSV logs from `gpu_watch.py` or `gpu_watch.sh`.
+- Dependencies: requires `matplotlib` (install with `pip install matplotlib`).
+- Input formats (auto-detected):
+  - From `gpu_watch.py`: `timestamp,gpu_index,pid,cmd,gpu_mem_mib,sm_util_pct,mem_util_pct`
+  - From `gpu_watch.sh`: `timestamp,used_mib[,sys_used_mib][,cpu_cores][,cpu_pct]`
+- Default figure (2 subplots):
+  - Top: GPU memory (MiB). With `--per-gpu`, draws one line per GPU index.
+  - Bottom: System memory (MiB), if `sys_used_mib` exists; otherwise shows a placeholder.
+- Optional third subplot (CPU%):
+  - Add `--cpu` to draw CPU usage percent from `cpu_pct` if present.
+- Examples:
+  - `python3 plot_gpu_usage.py gpu_log.csv --output gpu_usage.png`
+  - `python3 plot_gpu_usage.py gpu_log.csv --per-gpu --output per_gpu.png`
+  - `python3 plot_gpu_usage.py mem_only_long.csv --cpu --output usage_cpu.png`
+  - `python3 plot_gpu_usage.py gpu_log.csv --show`
 
 **CSV Output**
 - Header (first line unless `--append` is used on an existing file):
